@@ -1,2 +1,0 @@
-# scripts
-all open source !
