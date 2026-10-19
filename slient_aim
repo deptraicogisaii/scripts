@@ -1,0 +1,200 @@
+local _Players = game:GetService('Players')
+local _RunService = game:GetService('RunService')
+local _LocalPlayer = _Players.LocalPlayer
+local _Character = _LocalPlayer.Character or _LocalPlayer.CharacterAdded:Wait()
+local _CurrentCamera = workspace.CurrentCamera
+local _StarterGui = game:GetService('StarterGui')
+
+local function Notify(title, text, duration)
+    pcall(function()
+        _StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = text,
+            Duration = duration or 3
+        })
+    end)
+end
+
+local Mouse = _LocalPlayer:GetMouse()
+
+local FOV = Drawing.new("Circle")
+FOV.Transparency = 1
+FOV.Thickness = 1.6
+FOV.Color = Color3.fromRGB(230, 230, 250)
+FOV.Filled = false
+FOV.Visible = false
+
+local viewportSize = _CurrentCamera.ViewportSize
+local screenCenter = Vector2.new(viewportSize.X / 2, viewportSize.Y / 2)
+
+task.spawn(function()
+    while task.wait() do
+        local setting = getgenv().Silent.Setting
+        if setting.FOVType == "Mouse" then
+            FOV.Position = Vector2.new(Mouse.X, Mouse.Y)
+        else
+            FOV.Position = screenCenter
+        end
+        FOV.Visible = setting.FOV.Visible
+        FOV.Radius = setting.FOV.Radius
+    end
+end)
+
+_CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+    viewportSize = _CurrentCamera.ViewportSize
+    screenCenter = Vector2.new(viewportSize.X / 2, viewportSize.Y / 2)
+end)
+
+local function GetTargetPart(character)
+    if not character then return nil end
+    local parts = getgenv().Silent.Setting.Part
+    local partName
+    if type(parts) == "table" and #parts > 0 then
+        partName = parts[math.random(1, #parts)]
+    else
+        partName = parts or "HumanoidRootPart"
+    end
+    local part = character:FindFirstChild(partName)
+    if not part then part = character:FindFirstChild("HumanoidRootPart") end
+    return part
+end
+
+local SHOTGUN_WEAPONS = {
+    ["[Double-Barrel SG]"] = true, ["[TacticalShotgun]"] = true, ["[Shotgun]"] = true,
+    ["[Drum-Shotgun]"] = true, ["Double Barrel"] = true, ["Tactical Shotgun"] = true,
+    ["TacticalShotgun"] = true, ["Double Barrel SG"] = true
+}
+
+local currentWeapon = nil
+local targetPartCache = nil
+
+local function CalculateDirection(origin, target, spread)
+    local dir = target - origin
+    local dist = dir.Magnitude
+    if spread and spread > 0 then
+        local s = spread * dist / 100
+        return (target + Vector3.new((math.random() * 2 - 1) * s, (math.random() * 2 - 1) * s, (math.random() * 2 - 1) * s) - origin).Unit * dist
+    end
+    return dir
+end
+
+local function FindClosestPlayerToCenter()
+    local closestPlayer = nil
+    local closestDistance = math.huge
+    local setting = getgenv().Silent.Setting
+    local fovCenter = setting.FOVType == "Mouse" and Vector2.new(Mouse.X, Mouse.Y) or screenCenter
+    local maxRadius = setting.FOV.Radius
+
+    local players = _Players:GetPlayers()
+    for i = 1, #players do
+        local player = players[i]
+        if player ~= _LocalPlayer and player.Character then
+            local character = player.Character
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                local humanoid = character:FindFirstChild("Humanoid")
+                if humanoid and humanoid.Health > 0 then
+                    local position, onScreen = _CurrentCamera:WorldToViewportPoint(hrp.Position)
+                    if onScreen then
+                        local distance = (fovCenter - Vector2.new(position.X, position.Y)).Magnitude
+                        if distance <= maxRadius and distance < closestDistance then
+                            closestPlayer = player
+                            closestDistance = distance
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return closestPlayer
+end
+
+local characterConnections = {}
+
+local function SetupCharacterConnections(character)
+    for _, connection in pairs(characterConnections) do
+        if connection then connection:Disconnect() end
+    end
+    table.clear(characterConnections)
+
+    characterConnections.childAdded = character.ChildAdded:Connect(function(child)
+        if child:IsA('Tool') then
+            currentWeapon = child.Name
+        end
+    end)
+
+    characterConnections.childRemoved = character.ChildRemoved:Connect(function(child)
+        if child:IsA('Tool') then
+            currentWeapon = nil
+            for _, tool in pairs(character:GetChildren()) do
+                if tool:IsA('Tool') and tool ~= child then
+                    currentWeapon = tool.Name
+                    break
+                end
+            end
+        end
+    end)
+
+    for _, child in pairs(character:GetChildren()) do
+        if child:IsA('Tool') then
+            currentWeapon = child.Name
+            break
+        end
+    end
+end
+
+_LocalPlayer.CharacterAdded:Connect(function(character)
+    task.wait(0.5)
+    _Character = character
+    SetupCharacterConnections(character)
+end)
+
+SetupCharacterConnections(_Character)
+
+_RunService.Heartbeat:Connect(function()
+    local targetPlayer = FindClosestPlayerToCenter()
+    if targetPlayer and targetPlayer.Character then
+        targetPartCache = GetTargetPart(targetPlayer.Character)
+    else
+        targetPartCache = nil
+    end
+end)
+
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(...)
+    local method = getnamecallmethod()
+    local args = {...}
+
+    if checkcaller() or not targetPartCache or not targetPartCache.Parent then
+        return oldNamecall(...)
+    end
+
+    local targetPosition = targetPartCache.Position
+    local isShotgun = SHOTGUN_WEAPONS[currentWeapon]
+
+    if method == "Raycast" or method == "raycast" then
+        local origin = args[2]
+        local direction = args[3]
+        
+        if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
+            args[3] = isShotgun 
+                and CalculateDirection(origin, targetPosition, 6)
+                or CalculateDirection(origin, targetPosition)
+            return oldNamecall(unpack(args))
+        end
+
+    elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+        local ray = args[2]
+        if typeof(ray) == "Ray" then
+            args[2] = Ray.new(
+                ray.Origin,
+                isShotgun 
+                    and CalculateDirection(ray.Origin, targetPosition, 6)
+                    or CalculateDirection(ray.Origin, targetPosition)
+            )
+            return oldNamecall(unpack(args))
+        end
+    end
+
+    return oldNamecall(...)
+end)
