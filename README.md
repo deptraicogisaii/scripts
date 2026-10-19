@@ -1,0 +1,2 @@
+# scripts
+all open source !
