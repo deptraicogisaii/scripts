@@ -1,0 +1,395 @@
+local Keybind = getgenv().KK.Keybind
+local knockCheckEnabled = getgenv().KK.KnockCheck
+
+local _Players = game:GetService('Players')
+local _RunService = game:GetService('RunService')
+local _StarterGui = game:GetService('StarterGui')
+local _UserInputService = game:GetService('UserInputService')
+local _HttpService = game:GetService('HttpService')
+local _Workspace = game:GetService('Workspace')
+local _LocalPlayer = _Players.LocalPlayer
+local _Character = _LocalPlayer.Character or _LocalPlayer.CharacterAdded:Wait()
+local _CurrentCamera = _Workspace.CurrentCamera
+
+local SHOTGUN_WEAPONS = {
+    ["[Double-Barrel SG]"] = true,
+    ["[TacticalShotgun]"] = true,
+    ["[Shotgun]"] = true,
+    ["[Drum-Shotgun]"] = true,
+    ["Double Barrel"] = true,
+    ["Tactical Shotgun"] = true,
+    ["TacticalShotgun"] = true,
+    ["Double Barrel SG"] = true
+}
+
+local RAYCAST_VALIDATOR = {
+    ArgCountRequired = 3,
+    Args = {
+        'Instance',
+        'Vector3',
+        'Vector3',
+        'RaycastParams',
+    },
+}
+
+local function LoadPositions()
+    if not isfile('camlockpos.txt') then return {} end
+    local ok, data = pcall(function()
+        return _HttpService:JSONDecode(readfile('camlockpos.txt'))
+    end)
+    if ok and data then return data end
+    return {}
+end
+
+local function SavePosition(name, pos)
+    local data = LoadPositions()
+    data[name] = {
+        X = { Scale = pos.X.Scale, Offset = pos.X.Offset },
+        Y = { Scale = pos.Y.Scale, Offset = pos.Y.Offset }
+    }
+    writefile('camlockpos.txt', _HttpService:JSONEncode(data))
+end
+
+local function GetSavedPos(name, default)
+    local saved = LoadPositions()
+    if saved[name] then
+        local s = saved[name]
+        return UDim2.new(s.X.Scale, s.X.Offset, s.Y.Scale, s.Y.Offset)
+    end
+    return default
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "CamlockGui"
+gui.Parent = game:GetService("CoreGui")
+gui.ResetOnSpawn = false
+
+local TextButton = Instance.new("TextButton")
+TextButton.Text = "meow"
+TextButton.TextSize = 24
+TextButton.TextColor3 = Color3.new(1, 1, 1)
+TextButton.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
+TextButton.BorderColor3 = Color3.new(255, 0, 0)
+TextButton.BorderSizePixel = 4
+TextButton.BackgroundTransparency = 1
+TextButton.Font = Enum.Font.Code
+TextButton.Size = UDim2.new(0.2, 0, 0.2, 0)
+TextButton.Position = GetSavedPos('meow', UDim2.new(0, 0.9, 0.3, 1))
+TextButton.Parent = gui
+TextButton.Draggable = true
+
+local cornerUI = Instance.new("UICorner")
+cornerUI.CornerRadius = UDim.new(0, 4)
+cornerUI.Parent = TextButton
+
+local RageButton = Instance.new("TextButton")
+RageButton.Text = "rage"
+RageButton.TextSize = 24
+RageButton.TextColor3 = Color3.new(1, 1, 1)
+RageButton.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
+RageButton.BorderColor3 = Color3.new(255, 165, 0)
+RageButton.BorderSizePixel = 4
+RageButton.BackgroundTransparency = 1
+RageButton.Font = Enum.Font.Code
+RageButton.Size = UDim2.new(0.2, 0, 0.2, 0)
+RageButton.Position = GetSavedPos('rage', UDim2.new(0, 0.9, 0.55, 1))
+RageButton.Parent = gui
+RageButton.Draggable = true
+
+local cornerUI2 = Instance.new("UICorner")
+cornerUI2.CornerRadius = UDim.new(0, 4)
+cornerUI2.Parent = RageButton
+
+TextButton:GetPropertyChangedSignal('Position'):Connect(function()
+    SavePosition('meow', TextButton.Position)
+end)
+
+RageButton:GetPropertyChangedSignal('Position'):Connect(function()
+    SavePosition('rage', RageButton.Position)
+end)
+
+local targetPlayer = nil
+local targetPart = nil
+local currentWeapon = nil
+local camlockEnabled = false
+local characterConnections = {}
+
+local frameCount = 0
+local KNOCK_CHECK_RATE = 10
+
+local rageEnabled = false
+
+local function GetTargetPart(character)
+    if not character then return nil end
+    local parts = getgenv().KK.Part
+    local partName
+    if type(parts) == "table" then
+        partName = parts[math.random(1, #parts)]
+    else
+        partName = parts or "HumanoidRootPart"
+    end
+    local part = character:FindFirstChild(partName)
+    if not part then
+        part = character:FindFirstChild("HumanoidRootPart")
+    end
+    return part
+end
+
+local function SendNotification(title, text, duration)
+    pcall(function()
+        _StarterGui:SetCore("SendNotification", {
+            Title = title,
+            Text = text,
+            Duration = duration or 3,
+        })
+    end)
+end
+
+local function CalculateDirection(origin, target, spread)
+    local dir = (target - origin)
+    local dist = dir.Magnitude
+    local unit = dir.Unit
+    if spread and spread > 0 then
+        local s = spread * (dist / 100)
+        local function rs() return (math.random() * 2 - 1) * s end
+        unit = (target + Vector3.new(rs(), rs(), rs()) - origin).Unit
+    end
+    return dist * unit
+end
+
+local function ValidateRaycastArgs(args, validator)
+    if #args < validator.ArgCountRequired then
+        return false
+    end
+    local count = 0
+    for index, arg in pairs(args) do
+        if typeof(arg) == validator.Args[index] then
+            count = count + 1
+        end
+    end
+    return count >= validator.ArgCountRequired
+end
+
+local function FindClosestPlayerToCenter()
+    local closestPlayer = nil
+    local closestDistance = math.huge
+    local screenCenter = Vector2.new(_CurrentCamera.ViewportSize.X / 2, _CurrentCamera.ViewportSize.Y / 2)
+
+    for _, player in ipairs(_Players:GetPlayers()) do
+        if player ~= _LocalPlayer and player.Character then
+            local character = player.Character
+            local part = character:FindFirstChild("UpperTorso") or character:FindFirstChild("HumanoidRootPart")
+            local humanoid = character:FindFirstChild("Humanoid")
+
+            if part and humanoid and humanoid.Health > 0 then
+                local position, onScreen = _CurrentCamera:WorldToViewportPoint(part.Position)
+                if onScreen then
+                    local distance = (screenCenter - Vector2.new(position.X, position.Y)).Magnitude
+                    if distance < closestDistance then
+                        closestPlayer = player
+                        closestDistance = distance
+                    end
+                end
+            end
+        end
+    end
+
+    return closestPlayer
+end
+
+local function DisableRage()
+    rageEnabled = false
+    RageButton.TextColor3 = Color3.new(1, 1, 1)
+end
+
+local function EnableRage()
+    rageEnabled = true
+    RageButton.TextColor3 = Color3.fromRGB(255, 165, 0)
+end
+
+local function ToggleRage()
+    if rageEnabled then DisableRage() else EnableRage() end
+end
+
+local function DisableCamlock()
+    targetPlayer = nil
+    targetPart = nil
+    camlockEnabled = false
+    TextButton.TextColor3 = Color3.new(1, 1, 1)
+end
+
+local function ToggleCamlock()
+    if targetPlayer then
+        DisableCamlock()
+    else
+        targetPlayer = FindClosestPlayerToCenter()
+        if targetPlayer then
+            camlockEnabled = true
+            TextButton.TextColor3 = Color3.new(1, 0, 0)
+        end
+    end
+end
+
+local function DisconnectCharacterConnections()
+    for _, connection in pairs(characterConnections) do
+        if connection then
+            connection:Disconnect()
+        end
+    end
+    characterConnections = {}
+end
+
+local function SetupCharacterConnections(character)
+    DisconnectCharacterConnections()
+
+    characterConnections.childAdded = character.ChildAdded:Connect(function(child)
+        if child:IsA('Tool') then
+            currentWeapon = child.Name
+        end
+    end)
+
+    characterConnections.childRemoved = character.ChildRemoved:Connect(function(child)
+        if child:IsA('Tool') then
+            currentWeapon = nil
+        end
+    end)
+
+    for _, child in pairs(character:GetChildren()) do
+        if child:IsA('Tool') then
+            currentWeapon = child.Name
+            break
+        end
+    end
+end
+
+_UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Keybind then
+        ToggleCamlock()
+    end
+end)
+
+_LocalPlayer.Chatted:Connect(function(message)
+    if message:lower() == "/e reset" then
+        SavePosition('meow', UDim2.new(0, 0.9, 0.3, 1))
+        SavePosition('rage', UDim2.new(0, 0.9, 0.55, 1))
+        TextButton.Position = UDim2.new(0, 0.9, 0.3, 1)
+        RageButton.Position = UDim2.new(0, 0.9, 0.55, 1)
+        DisableCamlock()
+        DisableRage()
+        SendNotification("bad lock", "positions reset to default!", 3)
+    end
+end)
+
+TextButton.MouseButton1Click:Connect(function()
+    ToggleCamlock()
+end)
+
+RageButton.MouseButton1Click:Connect(function()
+    ToggleRage()
+end)
+
+_LocalPlayer.CharacterAdded:Connect(function(character)
+    task.wait(0.5)
+    _Character = character
+    SetupCharacterConnections(character)
+end)
+
+_Players.PlayerRemoving:Connect(function(player)
+    if player == targetPlayer then
+        DisableCamlock()
+    end
+end)
+
+SetupCharacterConnections(_Character)
+
+_RunService.RenderStepped:Connect(function()
+    if getgenv().KK.Camlock.Enable and camlockEnabled and targetPlayer and targetPlayer.Character then
+        local part = targetPlayer.Character:FindFirstChild("UpperTorso")
+    or targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if part then
+            targetPart = part
+            local currentCFrame = _CurrentCamera.CFrame
+            local targetCFrame = CFrame.new(currentCFrame.Position, part.Position)
+            _CurrentCamera.CFrame = currentCFrame:Lerp(targetCFrame, getgenv().KK.Camlock.Smooth)
+        else
+            targetPart = nil
+        end
+    else
+        targetPart = nil
+    end
+
+    if rageEnabled and camlockEnabled and targetPlayer and targetPlayer.Character and _Character then
+        local tgt = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
+    or targetPlayer.Character:FindFirstChild("UpperTorso")
+        local hrp = _Character:FindFirstChild("HumanoidRootPart")
+
+        if tgt and hrp then
+            local t = tick() * 20
+            local radius = 7
+            local x = math.sin(t * 1.7) * radius
+            local z = math.cos(t * 2.3) * radius
+            local y = math.sin(t * 4) * 1.5 + 2
+            hrp.CFrame = CFrame.new(tgt.Position + Vector3.new(x, y, z), tgt.Position)
+        end
+    end
+end)
+
+_RunService.Heartbeat:Connect(function()
+    frameCount = frameCount + 1
+
+    if frameCount % KNOCK_CHECK_RATE == 0 then
+        if knockCheckEnabled and targetPlayer and targetPlayer.Character then
+            local hum = targetPlayer.Character:FindFirstChild('Humanoid')
+            if hum and hum.Health <= 1 then
+                DisableCamlock()
+                return
+            end
+        end
+    end
+end)
+
+local originalNamecall
+originalNamecall = hookmetamethod(game, "__namecall", newcclosure(function(...)
+    local method = getnamecallmethod()
+    local args = {...}
+
+    if checkcaller() or not targetPlayer or not targetPart then
+        return originalNamecall(...)
+    end
+
+    local targetPosition = targetPart.Position
+    local isShotgun = SHOTGUN_WEAPONS[currentWeapon]
+
+    if method == "Raycast" or method == "raycast" then
+        local origin = args[2]
+        local direction = args[3]
+        
+        if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" then
+            local newDirection = isShotgun 
+                and CalculateDirection(origin, targetPosition, 6)
+                or CalculateDirection(origin, targetPosition)
+            
+            if newDirection and newDirection.Magnitude > 0 then
+                args[3] = newDirection
+                return originalNamecall(unpack(args))
+            end
+        end
+
+    elseif method == "FindPartOnRay" or method == "FindPartOnRayWithIgnoreList" or method == "FindPartOnRayWithWhitelist" then
+        local ray = args[2]
+        if typeof(ray) == "Ray" then
+            local origin = ray.Origin
+            local newDirection = isShotgun
+                and CalculateDirection(origin, targetPosition, 6)
+                or CalculateDirection(origin, targetPosition)
+            
+            if newDirection and newDirection.Magnitude > 0 then
+                args[2] = Ray.new(origin, newDirection)
+                return originalNamecall(unpack(args))
+            end
+        end
+    end
+
+    return originalNamecall(...)
+end))
